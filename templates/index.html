@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>踏切検索マップ (Flask版)</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            display: flex;
+        }
+        .sidebar {
+            width: 300px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .main-content {
+            flex-grow: 1;
+            padding: 20px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .map-container {
+            flex-grow: 1;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h3>検索条件</h3>
+        <form method="post">
+            <div class="mb-3">
+                <label for="search_name" class="form-label">踏切名で検索</label>
+                <input type="text" class="form-control" id="search_name" name="search_name" value="{{ request.form.search_name }}">
+            </div>
+
+            {% for col, options in filters.items() %}
+            <div class="mb-3">
+                <label for="{{ col }}" class="form-label">{{ col }}で絞り込み</label>
+                <select class="form-select" id="{{ col }}" name="{{ col }}">
+                    <option value="すべて">すべて</option>
+                    {% for option in options %}
+                    <option value="{{ option }}" {% if request.form[col] == option %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+            
+            <button type="submit" class="btn btn-primary w-100">検索</button>
+        </form>
+    </div>
+
+    <div class="main-content">
+        <h1>踏切検索マップ 🗺️</h1>
+        <p>表示件数: {{ count }}件</p>
+        <div class="map-container">
+            {% if map_html %}
+                {{ map_html|safe }}
+            {% else %}
+                <p class="text-center p-5">条件に一致する踏切はありませんでした。</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+```
+
+#### **3. バックエンドの作成 (`app.py`)**
+
+プロジェクトのルートに`app.py`を作成し、以下のコードを貼り付けます。これがデータの読み込み、絞り込み、地図の生成といったバックエンド処理を担当します。
+
+
+```python
+# app.py
+from flask import Flask, render_template, request
+import pandas as pd
+import folium
+import os
+
+app = Flask(__name__)
+
+# --- データ読み込み ---
+DATA_PATH = 'data/踏切_緯度経度追加_v5.csv'
+df = pd.read_csv(DATA_PATH)
+
+# --- フィルター用の選択肢を事前に作成 ---
+FILTER_COLS = {
+    '線名': '線名',
+    '支社名': '支社名',
+    '箇所名（系統名なし）': '箇所名（系統名なし）',
+    '踏切種別': '踏切種別'
+}
+filters = {}
+for key, col in FILTER_COLS.items():
+    if col in df.columns:
+        filters[key] = sorted(df[col].dropna().astype(str).unique().tolist())
+
+def format_kilopost(value):
+    if pd.isna(value): return ""
+    try:
+        value = float(value)
+        kilo = int(value / 1000)
+        meter = value % 1000
+        return f"{kilo}k{meter:05.1f}m"
+    except (ValueError, TypeError):
+        return str(value)
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    filtered_df = df.copy()
+
+    if request.method == 'POST':
+        # フォームから送信された値でフィルタリング
+        search_name = request.form.get('search_name', '')
+        if search_name and '踏切名' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['踏切名'].notna() & filtered_df['踏切名'].str.contains(search_name, na=False)]
+
+        for key, col in FILTER_COLS.items():
+            selected_value = request.form.get(key, 'すべて')
+            if selected_value != 'すべて' and col in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df[col] == selected_value]
+
+    map_html = None
+    if not filtered_df.empty:
+        center_lat = filtered_df['Lat'].mean()
+        center_lon = filtered_df['Lon'].mean()
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+
+        for _, row in filtered_df.iterrows():
+            if pd.notna(row['Lat']) and pd.notna(row['Lon']):
+                gmap_link = f"https://www.google.com/maps?q={row['Lat']},{row['Lon']}"
+                formatted_kilopost = format_kilopost(row.get('中心位置キロ程'))
+                popup_html = f"""
+                    <b>踏切名:</b> {row.get('踏切名', '名称不明')}<br>
+                    <b>線名:</b> {row.get('線名', '')}<br>
+                    <b>キロ程:</b> {formatted_kilopost}<br>
+                    <a href="{gmap_link}" target="_blank" rel="noopener noreferrer">Google Mapで開く</a>
+                """
+                popup = folium.Popup(popup_html, max_width=300)
+                folium.Marker(
+                    location=[row['Lat'], row['Lon']],
+                    popup=popup,
+                    tooltip=row.get('踏切名', '')
+                ).add_to(m)
+        
+        # 地図をHTMLとして取得（ヘッダーとフッターは不要）
+        map_html = m._repr_html_()
+
+    return render_template('index.html', map_html=map_html, filters=filters, count=len(filtered_df), request=request)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+---
+
+### ## ステップ3：アプリケーションの実行
+
+1.  ターミナル（またはコマンドプロンプト）で、プロジェクトフォルダに移動します。
+2.  必要なライブラリをインストールします。
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  Flaskアプリケーションを起動します。
+    ```bash
+    flask run
+    ```
+4.  ターミナルに表示されたURL（通常は `http://127.0.0.1:5000`）をWebブラウザで開きます。
+
+これでFlask版の踏切検索マップが表示されます。Streamlit版と比べて、フィルターを操作した際の再読み込みが「検索」ボタンを押したときだけになり、動作がより軽快に感じられるはず
